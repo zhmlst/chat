@@ -14,7 +14,6 @@ type Server struct{ cfg serverConfig }
 // ServerOption applies option to server.
 type ServerOption func(cfg *serverConfig)
 
-// ServerOptions provides available options for server.
 var ServerOptions serverOptionsNamespace
 
 type serverOptionsNamespace struct{}
