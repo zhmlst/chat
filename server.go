@@ -143,16 +143,22 @@ func (s *Server) serve() (err error) {
 		s.sessionsWG.Add(1)
 		go func(c *quic.Conn) {
 			defer func() {
-				if r := recover(); r != nil {
-					_ = r
-				}
 				_ = closeConn(c, codes.Done)
 				s.mtx.Lock()
 				delete(s.conns, c)
 				s.mtx.Unlock()
 				s.sessionsWG.Done()
 			}()
-			s.cfg.handler(s.ctx, NewSession(c))
+			session, err := NewSession(s.ctx, c)
+			if err != nil {
+				return
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					_ = r
+				}
+			}()
+			s.cfg.handler(s.ctx, session)
 		}(conn)
 	}
 }
@@ -162,20 +168,10 @@ var ErrServerNotRunning = errors.New("server not running")
 
 // Stop terminates the server immediately, closing all active connections.
 func (s *Server) Stop() error {
-	s.mtx.Lock()
-	if s.lnr == nil {
-		s.mtx.Unlock()
-		return ErrServerNotRunning
-	}
-
-	if s.cancel != nil {
-		s.cancel()
-		s.cancel = nil
-	}
-
+	s.cancel()
 	cerr := s.lnr.Close()
-	s.lnr = nil
 
+	s.mtx.Lock()
 	conns := make([]*quic.Conn, 0, len(s.conns))
 	for conn := range s.conns {
 		conns = append(conns, conn)
@@ -195,20 +191,8 @@ func (s *Server) Stop() error {
 
 // Shutdown gracefully stops the server, waiting for all active sessions to complete or until the given context expires.
 func (s *Server) Shutdown(ctx context.Context) error {
-	s.mtx.Lock()
-	if s.lnr == nil {
-		s.mtx.Unlock()
-		return ErrServerNotRunning
-	}
-
-	if s.cancel != nil {
-		s.cancel()
-		s.cancel = nil
-	}
-
+	s.cancel()
 	cerr := s.lnr.Close()
-	s.lnr = nil
-	s.mtx.Unlock()
 
 	done := make(chan struct{})
 	go func() {

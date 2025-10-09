@@ -29,6 +29,12 @@ func main() {
 	server := chat.NewServer(
 		chat.ServerOptions.Handler(func(ctx context.Context, s *chat.Session) {
 			log.Info("session started")
+			in, out := s.Input(ctx), s.Output(ctx)
+			for msg := range in {
+				out <- msg
+			}
+			close(out)
+			log.Info("session stopped")
 		}),
 	)
 
