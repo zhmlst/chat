@@ -2,7 +2,10 @@ module github.com/zhmlst/chat
 
 go 1.25.1
 
-require github.com/quic-go/quic-go v0.55.0
+require (
+	github.com/chzyer/readline v1.5.1
+	github.com/quic-go/quic-go v0.55.0
+)
 
 require (
 	golang.org/x/crypto v0.41.0 // indirect
