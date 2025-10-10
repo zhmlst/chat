@@ -132,19 +132,14 @@ func (s *Server) serve() (err error) {
 	for {
 		conn, err := s.lnr.Accept(s.ctx)
 		if err != nil {
-			if errors.Is(err, quic.ErrServerClosed) {
+			if errors.Is(err, quic.ErrServerClosed) ||
+				errors.Is(err, context.Canceled) {
 				return nil
 			}
 			return errors.Join(fmt.Errorf("accept connection: %w", err), s.Stop())
 		}
 		lgr := s.cfg.logger.With("addr", conn.RemoteAddr().String())
 		lgr.Info("connection accepted")
-
-		select {
-		case <-s.ctx.Done():
-			return nil
-		default:
-		}
 
 		s.mtx.Lock()
 		s.conns[conn] = struct{}{}
@@ -159,6 +154,7 @@ func (s *Server) serve() (err error) {
 				s.mtx.Lock()
 				delete(s.conns, c)
 				s.mtx.Unlock()
+				s.sessionsWG.Done()
 			}()
 			session, err := NewSession(s.ctx, c, lgr)
 			if err != nil {
