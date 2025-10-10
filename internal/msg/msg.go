@@ -1,3 +1,5 @@
+// Package msg provides utilities for constructing, sending and receiving
+// binary messages with fixed-size headers and variable payloads.
 package msg
 
 import (
@@ -8,11 +10,15 @@ import (
 	"time"
 )
 
+// Type defines the message payload type.
 type Type byte
 
 const (
+	// TypeControl represents a control message.
 	TypeControl Type = iota
+	// TypeText represents a text message.
 	TypeText
+	// TypeBinary represents a binary message.
 	TypeBinary
 )
 
@@ -25,16 +31,17 @@ const (
 	hdrLen  = 53
 )
 
-const (
-	buflen = 4096
-)
+const buflen = 4096
 
+// Message represents a single structured message with a fixed header and a payload.
 type Message struct {
 	hdr [hdrLen]byte
 	r   io.Reader
 	w   io.Writer
 }
 
+// New creates a new Message associated with the given writer.
+// It automatically generates a random message ID and sets the current timestamp.
 func New(w io.Writer) (*Message, error) {
 	m := &Message{w: w}
 	var id [16]byte
@@ -59,6 +66,7 @@ func writeFull(w io.Writer, buf []byte) (int, error) {
 	return total, nil
 }
 
+// Write writes the message header and payload to the associated writer.
 func (m *Message) Write(pld []byte) (int, error) {
 	m.SetLen(uint32(len(pld)))
 	nHdr, err := writeFull(m.w, m.hdr[:])
@@ -69,6 +77,7 @@ func (m *Message) Write(pld []byte) (int, error) {
 	return nHdr + nPld, err
 }
 
+// Rcv reads a message header from the given reader and returns a new Message.
 func Rcv(r io.Reader) (*Message, error) {
 	m := &Message{r: r}
 	for total := 0; total < hdrLen; {
@@ -81,6 +90,7 @@ func Rcv(r io.Reader) (*Message, error) {
 	return m, nil
 }
 
+// Read returns an iterator that yields payload chunks and errors while reading.
 func (m *Message) Read() iter.Seq2[[]byte, error] {
 	return func(yield func([]byte, error) bool) {
 		buf := make([]byte, buflen)
@@ -92,8 +102,7 @@ func (m *Message) Read() iter.Seq2[[]byte, error] {
 			if err == io.EOF {
 				return
 			}
-			if !yield(append([]byte(nil),
-				buf[:n]...), err) {
+			if !yield(append([]byte(nil), buf[:n]...), err) {
 				return
 			}
 			total += n
@@ -105,26 +114,32 @@ func (m *Message) setID(id [16]byte) {
 	copy(m.hdr[offID:offID+len(id)], id[:])
 }
 
+// ID returns the message ID.
 func (m *Message) ID() [16]byte {
 	return [16]byte(m.hdr[offID : offID+16])
 }
 
+// SetToken sets the message token.
 func (m *Message) SetToken(tok [16]byte) {
 	copy(m.hdr[offTok:offTok+len(tok)], tok[:])
 }
 
+// Token returns the message token.
 func (m *Message) Token() [16]byte {
 	return [16]byte(m.hdr[offTok : offTok+16])
 }
 
+// SetType sets the message type.
 func (m *Message) SetType(typ Type) {
 	m.hdr[offType] = byte(typ)
 }
 
+// Type returns the message type.
 func (m *Message) Type() Type {
 	return Type(m.hdr[offType])
 }
 
+// SetLen sets the payload length in the header.
 func (m *Message) SetLen(length uint32) {
 	m.hdr[offLen] = byte(length >> 24)
 	m.hdr[offLen+1] = byte(length >> 16)
@@ -132,6 +147,7 @@ func (m *Message) SetLen(length uint32) {
 	m.hdr[offLen+3] = byte(length)
 }
 
+// Len returns the payload length from the header.
 func (m *Message) Len() int {
 	return int(uint32(m.hdr[offLen])<<24 |
 		uint32(m.hdr[offLen+1])<<16 |
@@ -147,6 +163,7 @@ func (m *Message) setTimestamp(ts time.Time) {
 	}
 }
 
+// Timestamp returns the message timestamp as a time.Time value.
 func (m *Message) Timestamp() time.Time {
 	var ms uint64
 	for i := range 8 {
