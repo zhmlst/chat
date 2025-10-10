@@ -1,3 +1,5 @@
+// Package chat provides tools for working with the
+// chat-oriented QUIC based protocol such as server, client, etc.
 package chat
 
 import (
