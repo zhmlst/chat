@@ -12,6 +12,21 @@ import (
 	"github.com/zhmlst/chat/codes"
 )
 
+// TokenRepo defines the type that stores tokens.
+type TokenRepo interface {
+	SaveToken(ctx context.Context, tok [16]byte) error
+	HasToken(ctx context.Context, tok [16]byte) (has bool, err error)
+}
+
+// NopTokenRepo is a no-operation TokenRepo.
+type NopTokenRepo struct{}
+
+// SaveToken is no-operation token saving method.
+func (NopTokenRepo) SaveToken(context.Context, [16]byte) error { return nil }
+
+// HasToken is no-operation token check method.
+func (NopTokenRepo) HasToken(context.Context, [16]byte) (bool, error) { return false, nil }
+
 type serverConfig struct {
 	address     string
 	handler     Handler
@@ -27,7 +42,7 @@ func defaultServerConfig() serverConfig {
 		tlsCertFile: "cert.pem",
 		tlsKeyFile:  "key.pem",
 		logger:      NopLogger,
-		tokenRepo:   NopTokenRepo,
+		tokenRepo:   NopTokenRepo{},
 	}
 }
 
@@ -164,7 +179,7 @@ func (s *Server) serve() (err error) {
 				s.mtx.Unlock()
 				s.sessionsWG.Done()
 			}()
-			stream, err := s.handshake(s.ctx, c, lgr)
+			stream, err := s.handshake(s.ctx, c)
 			if err != nil {
 				lgr.With("error", err).Error("failed handshake")
 				return

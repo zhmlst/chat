@@ -11,13 +11,17 @@ inmemTokenRepo := make(map[[16]byte]struct{})
 server := chat.NewServer(
     chat.ServerOptions.Handler(func(ctx context.Context, s *chat.Session) {
         in, out := s.Input(ctx), s.Output(ctx)
+        defer close(out)
         out <- []byte("hello from server")
-
-        // incredibly simple channel-based API: echo messages
-        for msg := range in {
-            out <- msg
+        // echo messaging
+        for {
+            select {
+                case <-ctx.Done():
+                    return
+                case msg := <-in:
+                    out <- msg
+            }
         }
-        close(out)
     }),
     chat.ServerOptions.TokenRepo(inmemTokenRepo),
     chat.ServerOptions.Logger(func(lvl chat.LogLevel, msg string, args ...any) {

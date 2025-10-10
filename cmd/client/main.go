@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	lgr := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{}))
+	lgr := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
 		syscall.SIGINT,
