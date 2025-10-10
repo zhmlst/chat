@@ -18,8 +18,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
+            ${{ env.GOPATH }}/pkg/mod
+            ${{ env.GOCACHE }}
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
           restore-keys: |
             ${{ runner.os }}-go-
@@ -39,9 +39,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-            ~/go/bin
+            ${{ env.GOPATH }}/pkg/mod
+            ${{ env.GOCACHE }}
+            ${{ env.GOPATH }}/bin
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}-revive
           restore-keys: |
             ${{ runner.os }}-go-
