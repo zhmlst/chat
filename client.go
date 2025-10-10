@@ -18,7 +18,6 @@ type clientConfig struct {
 	certs   []string
 	insec   bool
 	logger  Logger
-	token   [16]byte
 }
 
 func defaultClientConfig() clientConfig {
@@ -63,7 +62,8 @@ func (clientOptionsNamespace) Logger(lgr Logger) ClientOption {
 
 // Client is a QUIC chat client.
 type Client struct {
-	cfg clientConfig
+	cfg   clientConfig
+	token [16]byte
 }
 
 // NewClient creates a client with specified options.
