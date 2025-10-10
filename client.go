@@ -17,12 +17,14 @@ type clientConfig struct {
 	servers []string
 	certs   []string
 	insec   bool
+	logger  Logger
 }
 
 func defaultClientConfig() clientConfig {
 	return clientConfig{
 		servers: []string{"localhost:4242"},
 		certs:   []string{"cert.pem"},
+		logger:  NopLogger,
 	}
 }
 
@@ -49,6 +51,12 @@ func (clientOptionsNamespace) Certs(files []string) ClientOption {
 func (clientOptionsNamespace) Insec(insec bool) ClientOption {
 	return func(cfg *clientConfig) {
 		cfg.insec = insec
+	}
+}
+
+func (clientOptionsNamespace) Logger(lgr Logger) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.logger = lgr
 	}
 }
 
@@ -79,12 +87,11 @@ func (c *Client) Dial(ctx context.Context) error {
 		var crt []byte
 		crt, err = os.ReadFile(certfile)
 		if err != nil {
-			// TODO: logging
+			c.cfg.logger.With("error", err).Error("failed to read cert")
 			continue
 		}
 		if !crts.AppendCertsFromPEM(crt) {
-			// TODO: logging
-			_ = crt
+			c.cfg.logger.With("file", certfile).Warn("failed to append cert")
 		}
 	}
 
@@ -102,7 +109,7 @@ func (c *Client) Dial(ctx context.Context) error {
 	for _, addr := range c.cfg.servers {
 		conn, err = quic.DialAddr(ctx, addr, tlsCfg, quicCfg)
 		if err != nil {
-			// TODO: logging
+			c.cfg.logger.With("error", err).Error(fmt.Sprintf("failed to dial %s", addr))
 			continue
 		}
 		break
@@ -119,11 +126,13 @@ func (c *Client) handleConn(ctx context.Context, conn *quic.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open stream: %w", err)
 	}
+	defer stream.Close()
 
 	rl, err := readline.New("> ")
 	if err != nil {
 		return fmt.Errorf("create readline: %w", err)
 	}
+	defer rl.Close()
 
 	errCh := make(chan error, 2)
 
@@ -148,7 +157,7 @@ func (c *Client) handleConn(ctx context.Context, conn *quic.Conn) error {
 	}()
 
 	go func() {
-		buf := make([]byte, 4096)
+		buf := make([]byte, buflen)
 		for {
 			n, err := stream.Read(buf)
 			if err != nil {
@@ -160,7 +169,8 @@ func (c *Client) handleConn(ctx context.Context, conn *quic.Conn) error {
 				return
 			}
 
-			fmt.Print(string(buf[:n]))
+			fmt.Println("\r" + string(buf[:n]))
+			rl.Refresh()
 		}
 	}()
 

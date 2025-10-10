@@ -36,6 +36,18 @@ func main() {
 			close(out)
 			log.Info("session stopped")
 		}),
+		chat.ServerOptions.Logger(func(lvl chat.LogLevel, msg string, arg ...any) {
+			switch lvl {
+			case chat.LogLevelDebug:
+				log.Debug(msg, arg...)
+			case chat.LogLevelInfo:
+				log.Info(msg, arg...)
+			case chat.LogLevelWarn:
+				log.Warn(msg, arg...)
+			case chat.LogLevelError:
+				log.Error(msg, arg...)
+			}
+		}),
 	)
 
 	log.Info("starting server")

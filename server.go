@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 	"github.com/zhmlst/chat/codes"
@@ -16,12 +17,16 @@ type serverConfig struct {
 	handler     Handler
 	tlsCertFile string
 	tlsKeyFile  string
+	logger      Logger
 }
 
-var defaultServerConfig = serverConfig{
-	address:     "localhost:4242",
-	tlsCertFile: "cert.pem",
-	tlsKeyFile:  "key.pem",
+func defaultServerConfig() serverConfig {
+	return serverConfig{
+		address:     "localhost:4242",
+		tlsCertFile: "cert.pem",
+		tlsKeyFile:  "key.pem",
+		logger:      NopLogger,
+	}
 }
 
 // ServerOption applies option to server.
@@ -56,6 +61,12 @@ func (serverOptionsNamespace) TLSKeyFile(file string) ServerOption {
 	}
 }
 
+func (serverOptionsNamespace) Logger(lgr Logger) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.logger = lgr
+	}
+}
+
 // Server provides chat sessions.
 type Server struct {
 	cfg        serverConfig
@@ -70,7 +81,7 @@ type Server struct {
 
 // NewServer creates a server with specified options.
 func NewServer(opts ...ServerOption) *Server {
-	cfg := defaultServerConfig
+	cfg := defaultServerConfig()
 	for _, opt := range opts {
 		opt(&cfg)
 	}
@@ -84,7 +95,7 @@ func NewServer(opts ...ServerOption) *Server {
 func (s *Server) Run() error {
 	crt, err := tls.LoadX509KeyPair(s.cfg.tlsCertFile, s.cfg.tlsKeyFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("load cert: %w", err)
 	}
 
 	tlsCfg := &tls.Config{
@@ -96,7 +107,7 @@ func (s *Server) Run() error {
 
 	lnr, err := quic.ListenAddr(s.cfg.address, tlsCfg, quicCfg)
 	if err != nil {
-		return err
+		return fmt.Errorf("listen %s: %w", s.cfg.address, err)
 	}
 
 	s.mtx.Lock()
@@ -113,9 +124,6 @@ func closeConn(conn *quic.Conn, code codes.Code) error {
 
 func (s *Server) serve() (err error) {
 	defer func() {
-		if s.lnr == nil {
-			return
-		}
 		if cerr := s.lnr.Close(); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("close listener: %w", cerr))
 		}
@@ -129,6 +137,8 @@ func (s *Server) serve() (err error) {
 			}
 			return errors.Join(fmt.Errorf("accept connection: %w", err), s.Stop())
 		}
+		lgr := s.cfg.logger.With("addr", conn.RemoteAddr().String())
+		lgr.Info("connection accepted")
 
 		select {
 		case <-s.ctx.Done():
@@ -143,22 +153,26 @@ func (s *Server) serve() (err error) {
 		s.sessionsWG.Add(1)
 		go func(c *quic.Conn) {
 			defer func() {
-				_ = closeConn(c, codes.Done)
+				if err := closeConn(c, codes.Done); err != nil {
+					lgr.With("error", err).Error("failed to close conn")
+				}
 				s.mtx.Lock()
 				delete(s.conns, c)
 				s.mtx.Unlock()
-				s.sessionsWG.Done()
 			}()
 			session, err := NewSession(s.ctx, c)
 			if err != nil {
+				lgr.With("error", err).Error("failed to create session")
 				return
 			}
 			defer func() {
 				if r := recover(); r != nil {
-					_ = r
+					lgr.With("panic", r).Error("panic in handler")
 				}
 			}()
+			start := time.Now()
 			s.cfg.handler(s.ctx, session)
+			lgr.With("duration", time.Since(start)).Info("exit session")
 		}(conn)
 	}
 }
