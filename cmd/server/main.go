@@ -12,12 +12,23 @@ import (
 	"github.com/zhmlst/chat"
 )
 
+type InmemTokenRepo map[[16]byte]struct{}
+
+func (i InmemTokenRepo) SaveToken(_ context.Context, tok [16]byte) error {
+	i[tok] = struct{}{}
+	return nil
+}
+func (i InmemTokenRepo) HasToken(_ context.Context, tok [16]byte) (bool, error) {
+	_, ok := i[tok]
+	return ok, nil
+}
+
 func main() {
 	logfile, err := os.OpenFile("server.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o640)
 	if err != nil {
 		return
 	}
-	lgr := slog.New(slog.NewJSONHandler(io.MultiWriter(logfile, os.Stdout), &slog.HandlerOptions{Level: slog.LevelDebug}))
+	lgr := slog.New(slog.NewTextHandler(io.MultiWriter(logfile, os.Stdout), &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
@@ -26,17 +37,22 @@ func main() {
 	)
 	defer cancel()
 
+	inmemTokenRepo := make(InmemTokenRepo)
 	server := chat.NewServer(
 		chat.ServerOptions.Handler(func(ctx context.Context, s *chat.Session) {
 			lgr.Info("session started")
 			in, out := s.Input(ctx), s.Output(ctx)
-			<-in
+			defer func() { close(out); lgr.Info("session stopped") }()
+
 			out <- []byte("hello from server")
-			for msg := range in {
-				out <- msg
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case msg := <-in:
+					out <- msg
+				}
 			}
-			close(out)
-			lgr.Info("session stopped")
 		}),
 		chat.ServerOptions.Logger(func(lvl chat.LogLevel, msg string, arg ...any) {
 			switch lvl {
@@ -50,6 +66,7 @@ func main() {
 				lgr.Error(msg, arg...)
 			}
 		}),
+		chat.ServerOptions.TokenRepo(inmemTokenRepo),
 	)
 
 	lgr.Info("starting server")

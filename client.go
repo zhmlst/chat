@@ -18,6 +18,7 @@ type clientConfig struct {
 	certs   []string
 	insec   bool
 	logger  Logger
+	token   string
 }
 
 func defaultClientConfig() clientConfig {
@@ -25,6 +26,13 @@ func defaultClientConfig() clientConfig {
 		servers: []string{"localhost:4242"},
 		certs:   []string{"cert.pem"},
 		logger:  NopLogger,
+		token: func() string {
+			dataDir := os.Getenv("XDG_DATA_HOME")
+			if dataDir == "" {
+				return ".token"
+			}
+			return dataDir + "/chat/token"
+		}(),
 	}
 }
 
@@ -60,10 +68,15 @@ func (clientOptionsNamespace) Logger(lgr Logger) ClientOption {
 	}
 }
 
+func (clientOptionsNamespace) TokenFile(file string) ClientOption {
+	return func(cfg *clientConfig) {
+		cfg.token = file
+	}
+}
+
 // Client is a QUIC chat client.
 type Client struct {
-	cfg   clientConfig
-	token [16]byte
+	cfg clientConfig
 }
 
 // NewClient creates a client with specified options.

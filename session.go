@@ -3,10 +3,12 @@
 package chat
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/quic-go/quic-go"
 	"github.com/zhmlst/chat/internal/msg"
@@ -81,193 +83,226 @@ func (s *Session) Output(ctx context.Context) chan<- []byte {
 // Handler defines a function type for handling sessions.
 type Handler func(ctx context.Context, s *Session)
 
-func (c *Client) handshake(ctx context.Context, conn *quic.Conn) (*quic.Stream, error) {
-	stream, err := conn.OpenStreamSync(ctx)
-	if err != nil {
-		c.cfg.logger.Error(fmt.Sprintf("failed to open stream: %v", err))
-		return nil, fmt.Errorf("failed to open stream: %w", err)
-	}
-	c.cfg.logger.Debug("stream opened")
+var (
+	// ErrInvalidToken is returned when a token received from a client
+	// does not match the expected size or format.
+	ErrInvalidToken = errors.New("invalid token")
 
-	if c.token == [16]byte{} {
-		var m *msg.Message
-		m, err = msg.New(stream)
+	// ErrInternal is returned when an unexpected internal server error occurs,
+	// such as failures in the handshake process or token handling.
+	ErrInternal = errors.New("internal server error")
+)
+
+func (c *Client) token(stream *quic.Stream, rep bool) (tok [16]byte, err error) {
+	lgr := c.cfg.logger.With("op", "token")
+	rawtok, err := os.ReadFile(c.cfg.token)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return tok, fmt.Errorf("failed to read token file: %w", err)
+	}
+	if len(rawtok) != cap(tok) || rep {
+		lgr.With("rep", rep).Debug("requesting new token")
+		m, err := msg.New(stream)
 		if err != nil {
-			c.cfg.logger.Error(fmt.Sprintf("failed to create handshake message: %v", err))
-			return nil, fmt.Errorf("failed to create handshake message: %w", err)
+			return tok, fmt.Errorf("failed to create message: %w", err)
 		}
 		m.SetType(msg.TypeControl)
-		c.cfg.logger.Debug("sending ack to request token")
-
-		_, writeErr := m.Write([]byte("ack"))
-		if writeErr != nil {
-			c.cfg.logger.Error(fmt.Sprintf("failed to send ack: %v", writeErr))
-			return nil, fmt.Errorf("failed to send ack: %w", writeErr)
+		if _, err = m.Write([]byte("ack")); err != nil {
+			return tok, fmt.Errorf("failed to write message: %w", err)
 		}
-
-		var r *msg.Message
-		r, err = msg.Rcv(stream)
+		r, err := msg.Rcv(stream)
 		if err != nil {
-			c.cfg.logger.Error(fmt.Sprintf("failed to receive token: %v", err))
-			return nil, fmt.Errorf("failed to receive token: %w", err)
+			return tok, fmt.Errorf("failed to receive message: %w", err)
 		}
-		if r.Type() != msg.TypeText {
-			c.cfg.logger.Error(fmt.Sprintf("unexpected message type: got %v, want TypeText", r.Type()))
-			return nil, fmt.Errorf("unexpected message type: got %v, want TypeText", r.Type())
-		}
-		var token []byte
-		token, err = r.ReadFull()
+		rawtok, err = r.ReadFull()
 		if err != nil {
-			c.cfg.logger.Error(fmt.Sprintf("failed to read full token: %v", err))
-			return nil, fmt.Errorf("failed to read full token: %w", err)
+			return tok, fmt.Errorf("failed to read message: %w", err)
 		}
-		copy(c.token[:], token)
-		c.cfg.logger.Info("received token from server")
+		if len(rawtok) != cap(tok) {
+			return tok, fmt.Errorf("%w: %s", ErrInvalidToken, string(rawtok))
+		}
+		lgr.Debug("received new token, saving")
+		if err := c.saveToken([16]byte(rawtok)); err != nil {
+			return tok, err
+		}
+		lgr.Info("new token saved")
+	} else {
+		lgr.Debug("using existing token")
 	}
+	return [16]byte(rawtok), nil
+}
 
-	var m *msg.Message
-	m, err = msg.New(stream)
+func (c *Client) saveToken(tok [16]byte) (err error) {
+	lgr := c.cfg.logger.With("module", "saveToken")
+	dir := filepath.Dir(c.cfg.token)
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("failed to mkdir %s for token file: %w", dir, err)
+	}
+	file, err := os.OpenFile(c.cfg.token, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 	if err != nil {
-		c.cfg.logger.Error(fmt.Sprintf("failed to create login message: %v", err))
-		return nil, fmt.Errorf("failed to create login message: %w", err)
+		return fmt.Errorf("failed to open token file: %w", err)
+	}
+	defer func() {
+		if cerr := file.Close(); cerr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to close token file: %w", cerr))
+		}
+	}()
+	if _, err = file.Write(tok[:]); err != nil {
+		return fmt.Errorf("failed to save token file %s: %w", c.cfg.token, err)
+	}
+	lgr.Info("token file written")
+	return nil
+}
+
+func (c *Client) handshake(ctx context.Context, conn *quic.Conn) (stream *quic.Stream, err error) {
+	lgr := c.cfg.logger.With("module", "handshake", "addr", conn.RemoteAddr().String())
+	lgr.Info("starting handshake")
+
+	stream, err = conn.OpenStreamSync(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open stream: %w", err)
+	}
+	lgr.Debug("stream opened")
+	// close stream on handshake failure
+	defer func() {
+		if err != nil {
+			if cerr := stream.Close(); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("failed to close stream: %w", cerr))
+			}
+		}
+	}()
+
+	attempt, maxAttempts := 1, 3
+tok:
+	tok, err := c.token(stream, attempt > 1)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get token: %w", err)
+	}
+	lgr.With("attempt", attempt).Debug("token obtained")
+
+	m, err := msg.New(stream)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create message: %w", err)
 	}
 	m.SetType(msg.TypeControl)
-	c.cfg.logger.Debug("sending login message with token")
+	m.SetToken(tok)
+	if _, err = m.Write([]byte("login")); err != nil {
+		return nil, fmt.Errorf("failed to write message: %w", err)
+	}
+	lgr.With("attempt", attempt).Debug("login message sent")
 
-	_, writeErr := m.Write(append([]byte("login "), c.token[:]...))
-	if writeErr != nil {
-		c.cfg.logger.Error(fmt.Sprintf("failed to send login message: %v", writeErr))
-		return nil, fmt.Errorf("failed to send login message: %w", writeErr)
+	r, err := msg.Rcv(stream)
+	if err != nil {
+		return nil, fmt.Errorf("failed to receive message: %w", err)
+	}
+	resp, err := r.ReadFull()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read message: %w", err)
 	}
 
-	var r *msg.Message
-	r, err = msg.Rcv(stream)
-	if err != nil {
-		c.cfg.logger.Error(fmt.Sprintf("failed to receive login response: %v", err))
-		return nil, fmt.Errorf("failed to receive login response: %w", err)
-	}
-	if r.Type() != msg.TypeText {
-		c.cfg.logger.Error(fmt.Sprintf("unexpected response type: got %v, want TypeText", r.Type()))
-		return nil, fmt.Errorf("unexpected response type: got %v, want TypeText", r.Type())
-	}
-	var resp []byte
-	resp, err = r.ReadFull()
-	if err != nil {
-		c.cfg.logger.Error(fmt.Sprintf("failed to read full login response: %v", err))
-		return nil, fmt.Errorf("failed to read full login response: %w", err)
-	}
 	if string(resp) != "ok" {
-		c.cfg.logger.Warn(fmt.Sprintf("login failed, server response: %q", string(resp)))
-		return nil, fmt.Errorf("login failed, server response: %q", string(resp))
+		lgr.With("attempt", attempt).Warn("login response not ok, retrying")
+		if attempt > maxAttempts {
+			return nil, ErrInternal
+		}
+		attempt++
+		goto tok
 	}
-	c.cfg.logger.Info("login successful")
 
+	lgr.With("attempt", attempt).Info("handshake completed successfully")
 	return stream, nil
 }
 
-// TokenRepo defines a function type for storaging tokens.
-type TokenRepo func(ctx context.Context, tok [16]byte) (has bool, err error)
+func (s *Server) handshake(ctx context.Context, conn *quic.Conn) (stream *quic.Stream, err error) {
+	lgr := s.cfg.logger.With("addr", conn.RemoteAddr().String(), "op", "handshake")
+	lgr.Debug("accepting stream")
 
-// NopTokenRepo is a no-operation TokenRepo.
-func NopTokenRepo(context.Context, [16]byte) (bool, error) { return false, nil }
-
-func (s *Server) handshake(ctx context.Context, conn *quic.Conn, lgr Logger) (*quic.Stream, error) {
-	stream, err := conn.AcceptStream(ctx)
+	stream, err = conn.AcceptStream(ctx)
 	if err != nil {
-		lgr.Error(fmt.Sprintf("failed to accept stream: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("failed to accept stream: %w", err)
 	}
-	lgr.Debug("stream accepted")
+	defer func() {
+		if err != nil {
+			if cerr := stream.Close(); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("failed to close stream: %w", cerr))
+			}
+		}
+	}()
 
-	m, err := msg.Rcv(stream)
+rcv:
+	r, err := msg.Rcv(stream)
 	if err != nil {
-		lgr.Error(fmt.Sprintf("failed to receive initial message: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("failed to receive message: %w", err)
 	}
-	if m.Type() != msg.TypeControl {
-		lgr.Warn("expected control message")
-		return nil, fmt.Errorf("expected control message")
-	}
+	lgr.Debug("message received")
 
-	payload, err := m.ReadFull()
+	pld, err := r.ReadFull()
 	if err != nil {
-		lgr.Error(fmt.Sprintf("failed to read initial message: %v", err))
-		return nil, err
+		return nil, fmt.Errorf("failed to read message: %w", err)
 	}
 
-	if string(payload) == "ack" {
-		lgr.Debug("client requests token")
+	switch string(pld) {
+	case "ack":
+		l := lgr.With("phase", "ack")
+		l.Debug("processing ack")
+		var tok [16]byte
+		if _, err = rand.Read(tok[:]); err != nil {
+			return nil, fmt.Errorf("failed to generate token: %w", err)
+		}
+		if err = s.cfg.tokenRepo.SaveToken(ctx, tok); err != nil {
+			return nil, fmt.Errorf("failed to save token: %w", err)
+		}
+		l.Info("generated and saved token")
 
-		var token [16]byte
-		if _, err = rand.Read(token[:]); err != nil {
-			lgr.Error(fmt.Sprintf("failed to generate token: %v", err))
-			return nil, err
+		m, err := msg.New(stream)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create token message: %w", err)
+		}
+		m.SetType(msg.TypeControl)
+		if _, err = m.Write(tok[:]); err != nil {
+			return nil, fmt.Errorf("failed to send token: %w", err)
+		}
+		l.Debug("token sent")
+
+	case "login":
+		l := lgr.With("phase", "login")
+		l.Debug("processing login")
+		tok := r.Token()
+		has, err := s.cfg.tokenRepo.HasToken(ctx, tok)
+		if err != nil {
+			return nil, fmt.Errorf("failed to check token: %w", err)
 		}
 
-		var resp *msg.Message
-		resp, err = msg.New(stream)
+		m, err := msg.New(stream)
 		if err != nil {
-			lgr.Error(fmt.Sprintf("failed to create token message: %v", err))
-			return nil, err
+			return nil, fmt.Errorf("failed to create response message: %w", err)
 		}
-		resp.SetType(msg.TypeText)
-		if _, err = resp.Write(token[:]); err != nil {
-			lgr.Error(fmt.Sprintf("failed to send token: %v", err))
-			return nil, err
-		}
-		lgr.Info("token sent to client")
+		m.SetType(msg.TypeControl)
 
-		m, err = msg.Rcv(stream)
-		if err != nil {
-			lgr.Error(fmt.Sprintf("failed to receive login message: %v", err))
-			return nil, err
-		}
-		if m.Type() != msg.TypeControl {
-			lgr.Warn("expected control message with token")
-			return nil, fmt.Errorf("expected control message with token")
-		}
-		payload, err = m.ReadFull()
-		if err != nil {
-			lgr.Error(fmt.Sprintf("failed to read login message: %v", err))
-			return nil, err
-		}
-		if !bytes.HasPrefix(payload, []byte("login ")) {
-			lgr.Warn("expected login message")
-			return nil, fmt.Errorf("expected login message")
-		}
-		copy(token[:], payload[6:])
-		lgr.Info("received login message with token")
-
-	} else if bytes.HasPrefix(payload, []byte("login ")) {
-		var token [16]byte
-		copy(token[:], payload[6:])
-		var has bool
-		has, err = s.cfg.tokenRepo(ctx, token)
-		if err != nil {
-			lgr.Error(fmt.Sprintf("token repository error: %v", err))
-			return nil, err
-		}
 		if !has {
-			lgr.Warn("invalid token")
-			return nil, fmt.Errorf("invalid token")
+			if _, err = m.Write([]byte("no")); err != nil {
+				return nil, fmt.Errorf("failed to write response: %w", err)
+			}
+			l.Warn("unknown token, asking client to retry")
+			goto rcv
 		}
-		lgr.Info("valid token received")
-	} else {
-		lgr.Warn(fmt.Sprintf("unexpected message: %s", string(payload)))
-		return nil, fmt.Errorf("unexpected message: %s", string(payload))
-	}
 
-	resp, err := msg.New(stream)
-	if err != nil {
-		lgr.Error(fmt.Sprintf("failed to create response message: %v", err))
-		return nil, err
-	}
-	resp.SetType(msg.TypeText)
-	if _, err := resp.Write([]byte("ok")); err != nil {
-		lgr.Error(fmt.Sprintf("failed to send ok response: %v", err))
-		return nil, err
-	}
-	lgr.Info("handshake completed successfully")
+		if _, err = m.Write([]byte("ok")); err != nil {
+			return nil, fmt.Errorf("failed to write response: %w", err)
+		}
+		l.Info("client authenticated")
+		return stream, nil
 
-	return stream, nil
+	default:
+		l := lgr.With("phase", "unknown")
+		l.Warn("unknown message type, responding no")
+		m, err := msg.New(stream)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create response message: %w", err)
+		}
+		m.SetType(msg.TypeControl)
+		if _, err = m.Write([]byte("no")); err != nil {
+			return nil, fmt.Errorf("failed to write response: %w", err)
+		}
+	}
+	goto rcv
 }
