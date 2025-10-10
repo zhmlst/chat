@@ -18,6 +18,7 @@ type clientConfig struct {
 	certs   []string
 	insec   bool
 	logger  Logger
+	token   [16]byte
 }
 
 func defaultClientConfig() clientConfig {

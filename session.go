@@ -14,16 +14,20 @@ const (
 // Session represents a QUIC session stream.
 type Session struct {
 	stream *quic.Stream
+	lgr    Logger
 }
 
 // NewSession accepts a new QUIC stream from the connection and returns a Session.
-func NewSession(ctx context.Context, conn *quic.Conn) (*Session, error) {
+func NewSession(ctx context.Context, conn *quic.Conn, lgr Logger) (*Session, error) {
+	lgr.Debug("accepting stream")
 	stream, err := conn.AcceptStream(ctx)
 	if err != nil {
 		return nil, err
 	}
+	lgr.Debug("stream accepted")
 	return &Session{
 		stream: stream,
+		lgr:    lgr,
 	}, nil
 }
 

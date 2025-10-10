@@ -17,7 +17,7 @@ func main() {
 	if err != nil {
 		return
 	}
-	log := slog.New(slog.NewJSONHandler(io.MultiWriter(logfile, os.Stdout), &slog.HandlerOptions{}))
+	log := slog.New(slog.NewJSONHandler(io.MultiWriter(logfile, os.Stdout), &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	ctx, cancel := signal.NotifyContext(
 		context.Background(),
@@ -30,6 +30,8 @@ func main() {
 		chat.ServerOptions.Handler(func(ctx context.Context, s *chat.Session) {
 			log.Info("session started")
 			in, out := s.Input(ctx), s.Output(ctx)
+			<-in
+			out <- []byte("hello from server")
 			for msg := range in {
 				out <- msg
 			}

@@ -160,7 +160,7 @@ func (s *Server) serve() (err error) {
 				delete(s.conns, c)
 				s.mtx.Unlock()
 			}()
-			session, err := NewSession(s.ctx, c)
+			session, err := NewSession(s.ctx, c, lgr)
 			if err != nil {
 				lgr.With("error", err).Error("failed to create session")
 				return
