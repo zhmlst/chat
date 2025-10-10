@@ -18,6 +18,7 @@ type serverConfig struct {
 	tlsCertFile string
 	tlsKeyFile  string
 	logger      Logger
+	tokenRepo   TokenRepo
 }
 
 func defaultServerConfig() serverConfig {
@@ -26,6 +27,7 @@ func defaultServerConfig() serverConfig {
 		tlsCertFile: "cert.pem",
 		tlsKeyFile:  "key.pem",
 		logger:      NopLogger,
+		tokenRepo:   NopTokenRepo,
 	}
 }
 
@@ -64,6 +66,12 @@ func (serverOptionsNamespace) TLSKeyFile(file string) ServerOption {
 func (serverOptionsNamespace) Logger(lgr Logger) ServerOption {
 	return func(cfg *serverConfig) {
 		cfg.logger = lgr
+	}
+}
+
+func (serverOptionsNamespace) TokenRepo(repo TokenRepo) ServerOption {
+	return func(cfg *serverConfig) {
+		cfg.tokenRepo = repo
 	}
 }
 
@@ -156,7 +164,12 @@ func (s *Server) serve() (err error) {
 				s.mtx.Unlock()
 				s.sessionsWG.Done()
 			}()
-			session, err := NewSession(s.ctx, c, lgr)
+			stream, err := s.handshake(s.ctx, c, lgr)
+			if err != nil {
+				lgr.With("error", err).Error("failed handshake")
+				return
+			}
+			session, err := NewSession(stream, lgr)
 			if err != nil {
 				lgr.With("error", err).Error("failed to create session")
 				return

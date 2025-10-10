@@ -123,9 +123,9 @@ func (c *Client) Dial(ctx context.Context) error {
 }
 
 func (c *Client) handleConn(ctx context.Context, conn *quic.Conn) error {
-	stream, err := conn.OpenStreamSync(ctx)
+	stream, err := c.handshake(ctx, conn)
 	if err != nil {
-		return fmt.Errorf("open stream: %w", err)
+		return fmt.Errorf("failed handshake: %w", err)
 	}
 	defer stream.Close()
 

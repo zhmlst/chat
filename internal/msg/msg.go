@@ -68,7 +68,7 @@ func writeFull(w io.Writer, buf []byte) (int, error) {
 
 // Write writes the message header and payload to the associated writer.
 func (m *Message) Write(pld []byte) (int, error) {
-	m.SetLen(uint32(len(pld)))
+	m.setLen(uint32(len(pld)))
 	nHdr, err := writeFull(m.w, m.hdr[:])
 	if err != nil {
 		return nHdr, err
@@ -110,6 +110,18 @@ func (m *Message) Read() iter.Seq2[[]byte, error] {
 	}
 }
 
+// ReadFull reads the entire message and returns it as a single byte slice.
+func (m *Message) ReadFull() ([]byte, error) {
+	var data []byte
+	for chunk, err := range m.Read() {
+		if err != nil {
+			return nil, err
+		}
+		data = append(data, chunk...)
+	}
+	return data, nil
+}
+
 func (m *Message) setID(id [16]byte) {
 	copy(m.hdr[offID:offID+len(id)], id[:])
 }
@@ -140,7 +152,7 @@ func (m *Message) Type() Type {
 }
 
 // SetLen sets the payload length in the header.
-func (m *Message) SetLen(length uint32) {
+func (m *Message) setLen(length uint32) {
 	m.hdr[offLen] = byte(length >> 24)
 	m.hdr[offLen+1] = byte(length >> 16)
 	m.hdr[offLen+2] = byte(length >> 8)
